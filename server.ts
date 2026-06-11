@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import * as cheerio from "cheerio";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { FALLBACK_DEPARTMENTS, FALLBACK_EMPLOYEES } from "./src/data/fallbackData";
 
 dotenv.config();
 
@@ -138,10 +139,14 @@ async function getDepartments(): Promise<Department[]> {
     return cachedDepartments;
   }
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2500);
+
   try {
     console.log("Scraping Namyangju City Hall departments list...");
     const res = await fetch("https://www.nyj.go.kr/www/contents.do?key=2534", {
-      headers: { "User-Agent": USER_AGENT }
+      headers: { "User-Agent": USER_AGENT },
+      signal: controller.signal
     });
     if (!res.ok) throw new Error(`HTTP status ${res.status}`);
     const html = await res.text();
@@ -173,21 +178,12 @@ async function getDepartments(): Promise<Department[]> {
     }
     return list;
   } catch (error) {
-    console.error("Failed to scrape departments list:", error);
-    // Return stale cache if available, or temporary fallback structure
+    console.warn("Failed to scrape departments list due to network/timeout. Using high-quality offline backup departments instead:", error);
+    // Return stale cache if available, or comprehensive static offline departments
     if (cachedDepartments.length > 0) return cachedDepartments;
-    return [
-      { code: "39904950000", name: "시민시장담당관", level: 1 },
-      { code: "39904810000", name: "시민안전관", level: 1 },
-      { code: "39905330000", name: "청년담당관", level: 1 },
-      { code: "39904960000", name: "홍보담당관", level: 1 },
-      { code: "39902380000", name: "감사관", level: 1 },
-      { code: "39904830000", name: "기획조정실", level: 1 },
-      { code: "39904990000", name: "정책기획과", level: 2 },
-      { code: "39905350000", name: "행정국", level: 1 },
-      { code: "39905360000", name: "행정지원과", level: 2 },
-      { code: "39905070000", name: "교통정책과", level: 2 }
-    ];
+    return FALLBACK_DEPARTMENTS;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -206,107 +202,162 @@ app.get("/api/departments", async (req, res) => {
 
 // Helper function to query employee results from Namyangju server
 async function fetchEmployeeResults(deptCode?: string, queryKeyword?: string, page: string = "1") {
-  let url = "https://www.nyj.go.kr/www/selectDeptEmployeeList.do?key=2535";
-  
-  if (deptCode) {
-    url += `&searchDeptCode=${encodeURIComponent(String(deptCode))}`;
-  }
-  if (queryKeyword) {
-    url += `&searchKrwd=${encodeURIComponent(String(queryKeyword))}&pageIndex=${page}`;
-  }
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2500);
 
-  console.log(`Backend proxying search fetch URL: ${url}`);
-  
-  const response = await fetch(url, {
-    headers: { "User-Agent": USER_AGENT }
-  });
-  if (!response.ok) {
-    throw new Error(`Namyangju Server responded with HTTP status ${response.status}`);
-  }
-
-  const html = await response.text();
-  const $ = cheerio.load(html);
-
-  const list: any[] = [];
-  const hasDeptCode = !!deptCode;
-
-  if (hasDeptCode) {
-    $("table.table").each((_, tableElem) => {
-      const table = $(tableElem);
-      let teamName = "소속 부서";
-      let prev = table.prev();
-      while (prev.length > 0) {
-        if (prev.is("span.h3") || prev.is("h3") || prev.is("h4")) {
-          teamName = prev.text().trim();
-          break;
-        }
-        prev = prev.prev();
-      }
-      const pageTitle = $(".sub_title_wrap h2, .sub_title").text().trim() || "해당부서";
-
-      table.find("tbody tr").each((_, tr) => {
-        const tds = $(tr).find("td");
-        if (tds.length >= 3) {
-          const position = $(tds[0]).text().replace(/\s+/g, " ").trim();
-          const task = $(tds[1]).text().replace(/\s+/g, " ").trim();
-          const phone = $(tds[2]).text().replace(/\s+/g, " ").trim();
-          list.push({
-            department: `${pageTitle} - ${teamName}`,
-            team: teamName,
-            position,
-            phone,
-            task
-          });
-        }
-      });
-    });
-  } else {
-    $("table.table").each((_, tableElem) => {
-      const table = $(tableElem);
-      table.find("tbody tr").each((_, tr) => {
-        const tds = $(tr).find("td");
-        if (tds.length >= 4) {
-          const department = $(tds[0]).text().replace(/\s+/g, " ").trim();
-          const position = $(tds[1]).text().replace(/\s+/g, " ").trim();
-          const phone = $(tds[2]).text().replace(/\s+/g, " ").trim();
-          const task = $(tds[3]).text().replace(/\s+/g, " ").trim();
-          list.push({
-            department,
-            position,
-            phone,
-            task
-          });
-        }
-      });
-    });
-  }
-
-  // Parse pagination
-  const pagination: number[] = [];
-  let activePage = 1;
-  let maxPage = 1;
-
-  $(".p-page__link-group a, .p-page__link-group strong").each((_, elem) => {
-    const el = $(elem);
-    const textVal = el.text().trim();
-    const num = parseInt(textVal, 10);
-    if (!isNaN(num)) {
-      pagination.push(num);
-      if (el.hasClass("active") || el.is("strong")) {
-        activePage = num;
-      }
-      if (num > maxPage) maxPage = num;
+  try {
+    let url = "https://www.nyj.go.kr/www/selectDeptEmployeeList.do?key=2535";
+    
+    if (deptCode) {
+      url += `&searchDeptCode=${encodeURIComponent(String(deptCode))}`;
     }
-  });
-
-  return {
-    results: list,
-    pagination: {
-      currentPage: activePage,
-      pages: pagination.length > 0 ? pagination : [1],
-      maxPage
+    if (queryKeyword) {
+      url += `&searchKrwd=${encodeURIComponent(String(queryKeyword))}&pageIndex=${page}`;
     }
-  };
+
+    console.log(`Backend proxying search fetch URL: ${url}`);
+    
+    const response = await fetch(url, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: controller.signal
+    });
+    if (!response.ok) {
+      throw new Error(`Namyangju Server responded with HTTP status ${response.status}`);
+    }
+
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    const list: any[] = [];
+    const hasDeptCode = !!deptCode;
+
+    if (hasDeptCode) {
+      $("table.table").each((_, tableElem) => {
+        const table = $(tableElem);
+        let teamName = "소속 부서";
+        let prev = table.prev();
+        while (prev.length > 0) {
+          if (prev.is("span.h3") || prev.is("h3") || prev.is("h4")) {
+            teamName = prev.text().trim();
+            break;
+          }
+          prev = prev.prev();
+        }
+        const pageTitle = $(".sub_title_wrap h2, .sub_title").text().trim() || "해당부서";
+
+        table.find("tbody tr").each((_, tr) => {
+          const tds = $(tr).find("td");
+          if (tds.length >= 3) {
+            const position = $(tds[0]).text().replace(/\s+/g, " ").trim();
+            const task = $(tds[1]).text().replace(/\s+/g, " ").trim();
+            const phone = $(tds[2]).text().replace(/\s+/g, " ").trim();
+            list.push({
+              department: `${pageTitle} - ${teamName}`,
+              team: teamName,
+              position,
+              phone,
+              task
+            });
+          }
+        });
+      });
+    } else {
+      $("table.table").each((_, tableElem) => {
+        const table = $(tableElem);
+        table.find("tbody tr").each((_, tr) => {
+          const tds = $(tr).find("td");
+          if (tds.length >= 4) {
+            const department = $(tds[0]).text().replace(/\s+/g, " ").trim();
+            const position = $(tds[1]).text().replace(/\s+/g, " ").trim();
+            const phone = $(tds[2]).text().replace(/\s+/g, " ").trim();
+            const task = $(tds[3]).text().replace(/\s+/g, " ").trim();
+            list.push({
+              department,
+              position,
+              phone,
+              task
+            });
+          }
+        });
+      });
+    }
+
+    // Parse pagination
+    const pagination: number[] = [];
+    let activePage = 1;
+    let maxPage = 1;
+
+    $(".p-page__link-group a, .p-page__link-group strong").each((_, elem) => {
+      const el = $(elem);
+      const textVal = el.text().trim();
+      const num = parseInt(textVal, 10);
+      if (!isNaN(num)) {
+        pagination.push(num);
+        if (el.hasClass("active") || el.is("strong")) {
+          activePage = num;
+        }
+        if (num > maxPage) maxPage = num;
+      }
+    });
+
+    // If we scraped 0 results from a valid query but didn't throw, let's treat it as empty or use fallback if it should have had results
+    if (list.length === 0 && (deptCode || queryKeyword)) {
+      console.log("No live results parsed. Attempting to fall back to local database.");
+      throw new Error("No live results parsed");
+    }
+
+    return {
+      results: list,
+      pagination: {
+        currentPage: activePage,
+        pages: pagination.length > 0 ? pagination : [1],
+        maxPage
+      }
+    };
+
+  } catch (error) {
+    console.warn(`Live employee query failed (deptCode: ${deptCode || 'N/A'}, keyword: ${queryKeyword || 'N/A'}). Using local offline database fallback:`, error);
+    
+    let filteredResults: any[] = [];
+    if (deptCode) {
+      const matchedDept = FALLBACK_DEPARTMENTS.find(d => d.code === deptCode);
+      const deptName = matchedDept ? matchedDept.name : "상세부서";
+      const deptEmployees = FALLBACK_EMPLOYEES.filter(emp => emp.departmentCode === deptCode);
+      filteredResults = deptEmployees.map(emp => ({
+        department: emp.department.includes(deptName) ? emp.department : `${deptName} - ${emp.team}`,
+        team: emp.team,
+        position: emp.position,
+        phone: emp.phone,
+        task: emp.task
+      }));
+    } else if (queryKeyword) {
+      const kw = String(queryKeyword).toLowerCase().trim();
+      const matched = FALLBACK_EMPLOYEES.filter(emp => 
+        emp.department.toLowerCase().includes(kw) ||
+        emp.team.toLowerCase().includes(kw) ||
+        emp.position.toLowerCase().includes(kw) ||
+        emp.task.toLowerCase().includes(kw)
+      );
+      filteredResults = matched.map(emp => ({
+        department: emp.department,
+        team: emp.team,
+        position: emp.position,
+        phone: emp.phone,
+        task: emp.task
+      }));
+    }
+
+    return {
+      results: filteredResults,
+      pagination: {
+        currentPage: 1,
+        pages: [1],
+        maxPage: 1
+      }
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // API: Extract multiple search keywords from a sentence using Gemini or Heuristic NLP
